@@ -1,0 +1,3 @@
+{"message":{"role":"user","content":"We should switch CORTEX nano to local embeddings later, but keep SQLite for now."}}
+{"message":{"role":"assistant","content":"Agreed. Next I will implement chunking and transcript-aware ingest."}}
+{"message":{"role":"user","content":"I prefer lean docs. No giant specs. Keep verbatim evidence local and sync only durable memory upstream."}}
