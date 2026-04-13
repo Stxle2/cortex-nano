@@ -9,3 +9,4 @@ venv/
 *.db-shm
 *.db-wal
 .debugdb/
+.env
