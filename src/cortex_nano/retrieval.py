@@ -145,3 +145,44 @@ def structural_retrieve(store: NanoStore, query: str = "", seed_atom_id: str = "
 
     results.sort(key=lambda x: x["score"], reverse=True)
     return results[:limit]
+
+
+def build_context_bundle(store: NanoStore, query: str = "", seed_atom_id: str = "",
+                         scope: str = "private", limit: int = 8,
+                         compressed: bool = False) -> str:
+    """
+    Build a compact context string ready to inject into an LLM prompt.
+
+    compressed=True  → use SemaLingua content_compressed field (smaller)
+    compressed=False → use content_raw (full fidelity)
+    """
+    results = structural_retrieve(store, query=query, seed_atom_id=seed_atom_id,
+                                  scope=scope, limit=limit)
+    if not results:
+        return "[CORTEX-NANO] no relevant memory found"
+
+    header = f"[CORTEX-NANO MEMORY] query={repr(query)} scope={scope} atoms={len(results)}"
+    lines = [header, ""]
+
+    for r in results:
+        atom = r["atom"]
+        aid = atom["id"][:8]
+        imp = float(atom.get("importance", 0.5))
+        score = r["score"]
+
+        # trail context
+        trails = store.list_trails_for_atom(atom["id"], scope=scope)
+        trail_refs = ""
+        if trails:
+            linked = [t["to_id"][:8] if t["from_id"] == atom["id"] else t["from_id"][:8]
+                      for t in trails[:3]]
+            trail_refs = f"  linked→ {', '.join(linked)}"
+
+        content = (atom.get("content_compressed") or atom.get("content_raw", "")) \
+            if compressed else atom.get("content_raw", "")
+
+        lines.append(f"[{aid}] score={score:.3f} importance={imp:.1f}{trail_refs}")
+        lines.append(content.strip()[:400])
+        lines.append("")
+
+    return "\n".join(lines).rstrip()

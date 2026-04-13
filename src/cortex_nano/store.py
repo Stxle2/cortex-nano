@@ -33,6 +33,7 @@ create table if not exists atoms (
   id text primary key,
   scope text not null default 'private',
   content_raw text not null,
+  content_compressed text,
   importance real not null default 0.5,
   state text not null default 'active',
   source_type text,
@@ -188,14 +189,17 @@ class NanoStore:
                     source_type: str | None = None, source_ref: str | None = None,
                     tags: list | None = None) -> dict:
         import json
+        from .semalingua import compress_atom
         now = _now()
         atom_id = _uid()
+        compressed = compress_atom(content, atom_id=atom_id, scope=scope,
+                                   source_type=source_type, tags=tags, importance=importance)
         with self._conn() as conn:
             conn.execute(
-                """insert into atoms(id, scope, content_raw, importance, state,
+                """insert into atoms(id, scope, content_raw, content_compressed, importance, state,
                    source_type, source_ref, tags, created_at, updated_at, last_accessed_at)
-                   values(?,?,?,?,?,?,?,?,?,?,?)""",
-                (atom_id, scope, content, importance, "active",
+                   values(?,?,?,?,?,?,?,?,?,?,?,?)""",
+                (atom_id, scope, content, compressed, importance, "active",
                  source_type, source_ref, json.dumps(tags or []), now, now, now),
             )
         return self.fetch_atom(atom_id)

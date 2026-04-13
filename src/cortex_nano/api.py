@@ -22,7 +22,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
-from .retrieval import structural_retrieve
+from .retrieval import structural_retrieve, build_context_bundle
 from .store import NanoStore
 
 
@@ -168,6 +168,44 @@ def _make_handler(store: NanoStore, api_key: str | None):
                     self._send({"ok": False, "error": str(e)}, 422)
                     return
                 self._send({"ok": True, "results": results, "count": len(results)})
+                return
+
+            # POST /retrieve/context  — returns LLM-ready context string
+            if method == "POST" and path == "/retrieve/context":
+                if not self._check_auth():
+                    return
+                b = self._body()
+                try:
+                    bundle = build_context_bundle(
+                        store,
+                        query=b.get("query", ""),
+                        seed_atom_id=b.get("seed_atom_id", ""),
+                        scope=b.get("scope", "private"),
+                        limit=int(b.get("limit", 8)),
+                        compressed=bool(b.get("compressed", False)),
+                    )
+                except ValueError as e:
+                    self._send({"ok": False, "error": str(e)}, 422)
+                    return
+                self._send({"ok": True, "context": bundle})
+                return
+
+            # POST /compress  — compress text into SemaLingua
+            if method == "POST" and path == "/compress":
+                if not self._check_auth():
+                    return
+                b = self._body()
+                from .semalingua import compress_atom, decompress
+                content = (b.get("content") or "").strip()
+                if not content:
+                    self._send({"ok": False, "error": "content required"}, 422)
+                    return
+                sl = compress_atom(content, scope=b.get("scope", "private"),
+                                   importance=float(b.get("importance", 0.5)))
+                result = {"ok": True, "sl": sl}
+                if b.get("decompress"):
+                    result["decompressed"] = decompress(sl)
+                self._send(result)
                 return
 
             # POST /ingest
