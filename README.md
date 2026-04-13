@@ -22,16 +22,12 @@ CORTEX-NANO is not a vector store wrapper. It is a local adaptive memory core.
 ## Install
 
 ```bash
-pip install cortex-nano
-```
-
-Or from source:
-
-```bash
 git clone https://github.com/Stxle2/cortex-nano
 cd cortex-nano
 pip install -e .
 ```
+
+> PyPI release coming. Until then install from source.
 
 ---
 
@@ -95,7 +91,10 @@ export KEY=your-api-key
 | `POST` | `/retrieve/context` | LLM-ready context bundle |
 | `POST` | `/compress` | Compress text → SemaLingua packet |
 | `POST` | `/ingest` | Ingest a file path into chunks |
-| `POST` | `/decay` | Run trail decay pass |
+| `POST` | `/decay` | Decay trails + dissolve weak structures |
+| `POST` | `/form-molecules` | Auto-cluster atoms into molecules via trail density |
+| `POST` | `/form-cells` | Auto-group molecules into cells by overlap |
+| `POST` | `/dissolve` | Remove molecules/cells below strength threshold |
 
 ### Example — store and retrieve
 
@@ -198,11 +197,14 @@ Commands:
 - [x] SemaLingua compression
 - [x] Local HTTP API
 - [x] File ingestion pipeline (transcripts, markdown, docs)
-- [ ] Molecule auto-formation from trail density
+- [x] Molecule auto-formation from trail density
+- [x] Cell auto-formation from molecule overlap
+- [x] Dissolve weak structures
 - [ ] ChromaDB semantic retrieval
 - [ ] Hybrid retrieval (structural + semantic)
 - [ ] `llms.txt` for agent-readable spec
 - [ ] Dockerfile
+- [ ] PyPI release
 
 ---
 

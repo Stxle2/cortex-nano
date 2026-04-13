@@ -228,7 +228,51 @@ def _make_handler(store: NanoStore, api_key: str | None):
                 if not self._check_auth():
                     return
                 b = self._body()
-                result = store.decay_trails(scope=b.get("scope", "private"))
+                scope = b.get("scope", "private")
+                result = store.decay_trails(scope=scope)
+                if b.get("dissolve", True):
+                    dissolved = store.dissolve_weak_structures(scope=scope)
+                    result.update(dissolved)
+                self._send({"ok": True, **result})
+                return
+
+            # POST /form-molecules
+            if method == "POST" and path == "/form-molecules":
+                if not self._check_auth():
+                    return
+                b = self._body()
+                result = store.form_molecules(
+                    scope=b.get("scope", "private"),
+                    min_trail_weight=float(b.get("min_trail_weight", 0.6)),
+                    min_reinforce_count=int(b.get("min_reinforce_count", 2)),
+                    limit=int(b.get("limit", 100)),
+                )
+                self._send({"ok": True, **result})
+                return
+
+            # POST /form-cells
+            if method == "POST" and path == "/form-cells":
+                if not self._check_auth():
+                    return
+                b = self._body()
+                result = store.form_cells(
+                    scope=b.get("scope", "private"),
+                    min_molecule_strength=float(b.get("min_molecule_strength", 0.55)),
+                    limit=int(b.get("limit", 100)),
+                )
+                self._send({"ok": True, **result})
+                return
+
+            # POST /dissolve
+            if method == "POST" and path == "/dissolve":
+                if not self._check_auth():
+                    return
+                b = self._body()
+                result = store.dissolve_weak_structures(
+                    scope=b.get("scope", "private"),
+                    min_molecule_strength=float(b.get("min_molecule_strength", 0.2)),
+                    min_cell_strength=float(b.get("min_cell_strength", 0.2)),
+                )
                 self._send({"ok": True, **result})
                 return
 

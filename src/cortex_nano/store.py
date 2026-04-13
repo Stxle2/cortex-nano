@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import sqlite3
 import uuid
 from datetime import datetime, timezone
@@ -349,3 +351,251 @@ class NanoStore:
                    on conflict(id) do update set weight=excluded.weight, updated_at=excluded.updated_at""",
                 (mem_id, parent_type, parent_id, child_type, child_id, scope, weight, now, now),
             )
+
+    # ── Molecule auto-formation ───────────────────────────────────────────────
+
+    def form_molecules(self, scope: str = "private", min_trail_weight: float = 0.6,
+                       min_reinforce_count: int = 2, limit: int = 100) -> dict:
+        """
+        Find connected clusters of atoms linked by strong trails and
+        create/update molecules from them. Ported from _src_v1 nano_form_molecules().
+        """
+        with self._conn() as conn:
+            rows = conn.execute(
+                """select from_id, to_id, weight from trails
+                   where scope = ? and weight >= ? and reinforce_count >= ?
+                   order by weight desc, reinforce_count desc limit ?""",
+                (scope, min_trail_weight, min_reinforce_count, limit),
+            ).fetchall()
+
+        # Build adjacency graph
+        graph: dict[str, list[str]] = {}
+        edge_weights: dict[str, float] = {}
+        for r in rows:
+            a, b, w = r["from_id"], r["to_id"], float(r["weight"])
+            graph.setdefault(a, []).append(b)
+            graph.setdefault(b, []).append(a)
+            edge_weights[f"{a}|{b}"] = w
+            edge_weights[f"{b}|{a}"] = w
+
+        # BFS connected components
+        visited: set[str] = set()
+        clusters: list[list[str]] = []
+        for atom_id in graph:
+            if atom_id in visited:
+                continue
+            queue = [atom_id]
+            cluster: list[str] = []
+            while queue:
+                current = queue.pop(0)
+                if current in visited:
+                    continue
+                visited.add(current)
+                cluster.append(current)
+                queue.extend(n for n in graph.get(current, []) if n not in visited)
+            if len(cluster) >= 2:
+                clusters.append(sorted(cluster))
+
+        # Create/update molecules from clusters
+        created = []
+        for cluster in clusters:
+            # Average edge weight as molecule strength
+            edge_ws = []
+            for i in range(len(cluster)):
+                for j in range(i + 1, len(cluster)):
+                    k = f"{cluster[i]}|{cluster[j]}"
+                    if k in edge_weights:
+                        edge_ws.append(edge_weights[k])
+            strength = min(1.0, sum(edge_ws) / len(edge_ws)) if edge_ws else 0.5
+
+            # Summary from first 4 atom contents
+            snippets = []
+            for aid in cluster[:4]:
+                atom = self.fetch_atom(aid)
+                if atom:
+                    snippets.append(atom["content_raw"][:80].replace("\n", " "))
+            summary = " | ".join(snippets)
+            label = summary[:60] or f"molecule-{cluster[0][:8]}"
+
+            mol = self.create_or_update_molecule(
+                label=label, scope=scope, summary=summary, strength=strength
+            )
+            for aid in cluster:
+                w = edge_weights.get(f"{cluster[0]}|{aid}", strength)
+                self.upsert_membership("molecule", mol["id"], "atom", aid, scope=scope, weight=w)
+            created.append(mol)
+
+        pruned = self._prune_subsumed_molecules(scope)
+        return {
+            "scope": scope,
+            "source_trails": len(rows),
+            "clusters": len(clusters),
+            "molecules_created": len(created),
+            "pruned": len(pruned),
+        }
+
+    def _prune_subsumed_molecules(self, scope: str) -> list[dict]:
+        """Remove molecules whose atom sets are fully contained in a larger molecule."""
+        with self._conn() as conn:
+            mols = conn.execute(
+                "select id, strength from molecules where scope = ? order by strength desc",
+                (scope,),
+            ).fetchall()
+            mol_atoms: dict[str, list[str]] = {}
+            for m in mols:
+                rows = conn.execute(
+                    "select child_id from memberships where parent_type='molecule' and parent_id=? and child_type='atom' order by child_id",
+                    (m["id"],),
+                ).fetchall()
+                mol_atoms[m["id"]] = [r["child_id"] for r in rows]
+
+        removed = []
+        mol_ids = [m["id"] for m in mols]
+        for cand_id in mol_ids:
+            cand_atoms = mol_atoms.get(cand_id, [])
+            if len(cand_atoms) < 2:
+                continue
+            cand_set = set(cand_atoms)
+            for cont_id in mol_ids:
+                if cont_id == cand_id:
+                    continue
+                cont_atoms = set(mol_atoms.get(cont_id, []))
+                if len(cont_atoms) > len(cand_set) and cand_set.issubset(cont_atoms):
+                    with self._conn() as conn:
+                        conn.execute("delete from memberships where parent_type='molecule' and parent_id=?", (cand_id,))
+                        conn.execute("delete from memberships where child_type='molecule' and child_id=?", (cand_id,))
+                        conn.execute("delete from molecules where id=?", (cand_id,))
+                    removed.append({"molecule_id": cand_id, "subsumed_by": cont_id})
+                    mol_atoms.pop(cand_id, None)
+                    break
+        return removed
+
+    # ── Cell auto-formation ───────────────────────────────────────────────────
+
+    def form_cells(self, scope: str = "private", min_molecule_strength: float = 0.55,
+                   limit: int = 100) -> dict:
+        """
+        Group overlapping molecules into cells. Ported from _src_v1 nano_form_cells().
+        """
+        with self._conn() as conn:
+            mols = conn.execute(
+                "select * from molecules where scope = ? and strength >= ? order by strength desc limit ?",
+                (scope, min_molecule_strength, limit),
+            ).fetchall()
+            mol_atoms: dict[str, list[str]] = {}
+            for m in mols:
+                rows = conn.execute(
+                    "select child_id from memberships where parent_type='molecule' and parent_id=? and child_type='atom' order by child_id",
+                    (m["id"],),
+                ).fetchall()
+                mol_atoms[m["id"]] = [r["child_id"] for r in rows]
+
+        # Group molecules by shared atoms or summary terms
+        import re as _re
+        groups: list[dict] = []
+        for mol in mols:
+            mol = dict(mol)
+            atom_ids = mol_atoms.get(mol["id"], [])
+            if len(atom_ids) < 2:
+                continue
+            mol_terms = set(_re.split(r"[^a-z0-9]+", (mol.get("summary") or "").lower())) - {""}
+
+            merged = False
+            for group in groups:
+                shared_atoms = set(group["atom_ids"]) & set(atom_ids)
+                shared_terms = mol_terms & group["terms"]
+                if shared_atoms or len(shared_terms) >= 2:
+                    group["molecules"].append(mol)
+                    group["atom_ids"] = list(set(group["atom_ids"]) | set(atom_ids))
+                    group["terms"] |= mol_terms
+                    group["summary"] = (group["summary"] + " " + (mol.get("summary") or "")).strip()
+                    merged = True
+                    break
+            if not merged:
+                groups.append({
+                    "molecules": [mol],
+                    "atom_ids": atom_ids,
+                    "terms": mol_terms,
+                    "summary": mol.get("summary") or "",
+                })
+
+        created = []
+        for group in groups:
+            if len(group["molecules"]) < 2:
+                continue
+            mol_list = group["molecules"]
+            strength = min(1.0, sum(float(m["strength"]) for m in mol_list) / len(mol_list))
+            summaries = [m.get("summary") or m.get("label") or "" for m in mol_list[:3]]
+            summary = " | ".join(s[:80] for s in summaries if s)
+            label = summary[:60] or f"cell-{mol_list[0]['id'][:8]}"
+
+            cell = self.create_or_update_cell(
+                label=label, scope=scope, summary=summary, strength=strength
+            )
+            for mol in mol_list:
+                self.upsert_membership("cell", cell["id"], "molecule", mol["id"], scope=scope, weight=float(mol["strength"]))
+            created.append(cell)
+
+        return {
+            "scope": scope,
+            "source_molecules": len(mols),
+            "cells_created": len(created),
+        }
+
+    def create_or_update_cell(self, label: str, scope: str = "private",
+                              summary: str | None = None, strength: float = 0.5,
+                              cell_id: str | None = None) -> dict:
+        now = _now()
+        cid = cell_id or _uid()
+        with self._conn() as conn:
+            existing = conn.execute("select id from cells where id = ?", (cid,)).fetchone()
+            if existing:
+                conn.execute(
+                    "update cells set label=?, summary=?, strength=?, updated_at=? where id=?",
+                    (label, summary, strength, now, cid),
+                )
+            else:
+                conn.execute(
+                    "insert into cells(id, scope, label, summary, strength, created_at, updated_at) values(?,?,?,?,?,?,?)",
+                    (cid, scope, label, summary, strength, now, now),
+                )
+            row = conn.execute("select * from cells where id = ?", (cid,)).fetchone()
+        return dict(row)
+
+    # ── Dissolve weak structures ───────────────────────────────────────────────
+
+    def dissolve_weak_structures(self, scope: str = "private",
+                                 min_molecule_strength: float = 0.2,
+                                 min_cell_strength: float = 0.2) -> dict:
+        """
+        Delete molecules and cells below strength threshold, plus their memberships.
+        Atoms are never deleted. Ported from _src_v1 nano_dissolve_weak_structures().
+        """
+        removed_memberships = removed_molecules = removed_cells = 0
+        with self._conn() as conn:
+            weak_mols = [r["id"] for r in conn.execute(
+                "select id from molecules where scope = ? and strength < ?",
+                (scope, min_molecule_strength),
+            ).fetchall()]
+            for mid in weak_mols:
+                c1 = conn.execute("delete from memberships where parent_type='molecule' and parent_id=?", (mid,)).rowcount
+                c2 = conn.execute("delete from memberships where child_type='molecule' and child_id=?", (mid,)).rowcount
+                conn.execute("delete from molecules where id=?", (mid,))
+                removed_memberships += c1 + c2
+                removed_molecules += 1
+
+            weak_cells = [r["id"] for r in conn.execute(
+                "select id from cells where scope = ? and strength < ?",
+                (scope, min_cell_strength),
+            ).fetchall()]
+            for cid in weak_cells:
+                c1 = conn.execute("delete from memberships where parent_type='cell' and parent_id=?", (cid,)).rowcount
+                conn.execute("delete from cells where id=?", (cid,))
+                removed_memberships += c1
+                removed_cells += 1
+
+        return {
+            "removed_molecules": removed_molecules,
+            "removed_cells": removed_cells,
+            "removed_memberships": removed_memberships,
+        }
