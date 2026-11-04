@@ -3,6 +3,7 @@ name = "cortex-nano"
 version = "0.1.0"
 description = "Local-first memory for agent transcripts, notes, and project docs"
 readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.10"
 dependencies = []
 
